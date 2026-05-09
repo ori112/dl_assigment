@@ -10,3 +10,9 @@ wheels/
 .venv
 CLAUDE.MD
 instructions/
+
+# Assignment artifacts (not part of submission)
+*.pt
+*.zip
+cifar-10-batches-py/
+.ipynb_checkpoints/
