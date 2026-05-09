@@ -2,6 +2,7 @@
 Implements a two-layer Neural Network classifier in PyTorch.
 WARNING: you SHOULD NOT use ".to()" or ".cuda()" in each implementation block.
 """
+
 import torch
 import random
 import statistics
@@ -147,7 +148,10 @@ def nn_forward_pass(params: Dict[str, torch.Tensor], X: torch.Tensor):
     # shape (N, C).                                                            #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    # First FC layer + ReLU (using clamp instead of torch.relu as required)
+    hidden = (X.mm(W1) + b1).clamp(min=0)
+    # Second FC layer gives the final class scores
+    scores = hidden.mm(W2) + b2
     ###########################################################################
     #                             END OF YOUR CODE                            #
     ###########################################################################
@@ -159,7 +163,7 @@ def nn_forward_backward(
     params: Dict[str, torch.Tensor],
     X: torch.Tensor,
     y: Optional[torch.Tensor] = None,
-    reg: float = 0.0
+    reg: float = 0.0,
 ):
     """
     Compute the loss and gradients for a two layer fully connected neural
@@ -212,7 +216,16 @@ def nn_forward_backward(
     # (Check Numeric Stability in http://cs231n.github.io/linear-classify/).   #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    # Subtract per-row max for numeric stability, then compute softmax probs
+    shifted = scores - scores.max(dim=1, keepdim=True).values
+    exp_scores = torch.exp(shifted)
+    probs = exp_scores / exp_scores.sum(dim=1, keepdim=True)
+
+    # Cross-entropy data loss averaged over the batch
+    correct_log_probs = -torch.log(probs[torch.arange(N), y])
+    loss = correct_log_probs.sum() / N
+    # L2 regularization on both weight matrices (no 1/2 coefficient)
+    loss += reg * (torch.sum(W1 * W1) + torch.sum(W2 * W2))
     ###########################################################################
     #                             END OF YOUR CODE                            #
     ###########################################################################
@@ -226,7 +239,23 @@ def nn_forward_backward(
     # tensor of same size                                                     #
     ###########################################################################
     # Replace "pass" statement with your code
-    pass
+    # Gradient of softmax loss w.r.t. scores: probs with -1 at correct class
+    d_scores = probs.clone()
+    d_scores[torch.arange(N), y] -= 1.0
+    d_scores /= N
+
+    # Backprop into the second FC layer
+    grads["W2"] = h1.t().mm(d_scores) + 2 * reg * W2
+    grads["b2"] = d_scores.sum(dim=0)
+
+    # Backprop through hidden layer: gradient into ReLU input
+    d_hidden = d_scores.mm(W2.t())
+    # ReLU backprop: zero out gradient where hidden activation was <= 0
+    d_hidden[h1 <= 0] = 0.0
+
+    # Backprop into the first FC layer
+    grads["W1"] = X.t().mm(d_hidden) + 2 * reg * W1
+    grads["b1"] = d_hidden.sum(dim=0)
     ###########################################################################
     #                             END OF YOUR CODE                            #
     ###########################################################################
@@ -307,7 +336,9 @@ def nn_train(
         # stored in the grads dictionary defined above.                         #
         #########################################################################
         # Replace "pass" statement with your code
-        pass
+        # SGD: update each parameter by stepping against its gradient
+        for param_name in params:
+            params[param_name] -= learning_rate * grads[param_name]
         #########################################################################
         #                             END OF YOUR CODE                          #
         #########################################################################
@@ -335,9 +366,7 @@ def nn_train(
     }
 
 
-def nn_predict(
-    params: Dict[str, torch.Tensor], loss_func: Callable, X: torch.Tensor
-):
+def nn_predict(params: Dict[str, torch.Tensor], loss_func: Callable, X: torch.Tensor):
     """
     Use the trained weights of this two-layer network to predict labels for
     data points. For each data point we predict scores for each of the C
@@ -365,7 +394,9 @@ def nn_predict(
     # TODO: Implement this function; it should be VERY simple!                #
     ###########################################################################
     # Replace "pass" statement with your code
-    pass
+    # Forward pass only (y=None): get scores then pick the highest-scoring class
+    scores = loss_func(params, X)
+    y_pred = scores.argmax(dim=1)
     ###########################################################################
     #                              END OF YOUR CODE                           #
     ###########################################################################
@@ -399,7 +430,12 @@ def nn_get_search_params():
     # classifier.                                                             #
     ###########################################################################
     # Replace "pass" statement with your code
-    pass
+    # Grid: 4 x 2 x 2 x 2 = 32 combinations, well under the 256-combo cap
+    # Higher LRs (0.1-1.0) are needed for this architecture and initialization scale
+    learning_rates = [1.0, 0.5, 0.1, 0.05]
+    hidden_sizes = [256, 512]
+    regularization_strengths = [1e-4, 1e-3]
+    learning_rate_decays = [0.95, 0.9]
     ###########################################################################
     #                           END OF YOUR CODE                              #
     ###########################################################################
@@ -412,9 +448,7 @@ def nn_get_search_params():
     )
 
 
-def find_best_net(
-    data_dict: Dict[str, torch.Tensor], get_param_set_fn: Callable
-):
+def find_best_net(data_dict: Dict[str, torch.Tensor], get_param_set_fn: Callable):
     """
     Tune hyperparameters using the validation set.
     Store your best trained TwoLayerNet model in best_net, with the return value
@@ -460,7 +494,38 @@ def find_best_net(
     # automatically like we did on the previous exercises.                      #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    learning_rates, hidden_sizes, reg_strengths, lr_decays = get_param_set_fn()
+
+    input_size = data_dict["X_train"].shape[1]
+    num_classes = int(data_dict["y_train"].max().item()) + 1
+    device = str(data_dict["X_train"].device)
+
+    # Try every combination in the grid search
+    for lr in learning_rates:
+        for hs in hidden_sizes:
+            for reg in reg_strengths:
+                for lr_decay in lr_decays:
+                    net = TwoLayerNet(input_size, hs, num_classes, device=device)
+                    stat = net.train(
+                        data_dict["X_train"],
+                        data_dict["y_train"],
+                        data_dict["X_val"],
+                        data_dict["y_val"],
+                        learning_rate=lr,
+                        learning_rate_decay=lr_decay,
+                        reg=reg,
+                        num_iters=2000,
+                        batch_size=200,
+                        verbose=False,
+                    )
+                    # Check validation accuracy at the end of training
+                    val_preds = net.predict(data_dict["X_val"])
+                    val_acc = (val_preds == data_dict["y_val"]).float().mean().item()
+
+                    if val_acc > best_val_acc:
+                        best_val_acc = val_acc
+                        best_net = net
+                        best_stat = stat
     #############################################################################
     #                               END OF YOUR CODE                            #
     #############################################################################
